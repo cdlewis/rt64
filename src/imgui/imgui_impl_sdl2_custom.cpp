@@ -92,7 +92,9 @@
 
 // SDL
 #include <SDL.h>
+#include <SDL_metal.h>
 #include <SDL_syswm.h>
+#include <SDL_vulkan.h>
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -595,8 +597,14 @@ void ImGui_ImplSDL2_NewFrame()
         w = h = 0;
     if (bd->Renderer != nullptr)
         SDL_GetRendererOutputSize(bd->Renderer, &display_w, &display_h);
-    else
+    else if (SDL_GetWindowFlags(bd->Window) & SDL_WINDOW_METAL)
+        SDL_Metal_GetDrawableSize(bd->Window, &display_w, &display_h);
+    else if (SDL_GetWindowFlags(bd->Window) & SDL_WINDOW_VULKAN)
+        SDL_Vulkan_GetDrawableSize(bd->Window, &display_w, &display_h);
+    else if (SDL_GetWindowFlags(bd->Window) & SDL_WINDOW_OPENGL)
         SDL_GL_GetDrawableSize(bd->Window, &display_w, &display_h);
+    else
+        SDL_GetWindowSize(bd->Window, &display_w, &display_h);
     io.DisplaySize = ImVec2((float)w, (float)h);
     if (w > 0 && h > 0)
         io.DisplayFramebufferScale = ImVec2((float)display_w / w, (float)display_h / h);

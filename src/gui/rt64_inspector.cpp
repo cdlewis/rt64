@@ -28,6 +28,11 @@
 #   include "plume_d3d12.h"
 #endif
 
+#if defined(__APPLE__)
+#   include "imgui/backends/imgui_impl_metal.h"
+#   include "plume_metal.h"
+#endif
+
 static std::string IniFilenameUTF8;
 
 #ifdef _WIN32
@@ -135,6 +140,17 @@ namespace RT64 {
             ImGui_ImplVulkan_Init(&initInfo);
             break;
         }
+        case UserConfiguration::GraphicsAPI::Metal: {
+#       if defined(__APPLE__)
+            MetalDevice *interfaceDevice = static_cast<MetalDevice *>(device);
+            ImGui_ImplMetal_Init(interfaceDevice->mtl);
+            ImGui_ImplMetal_CreateDeviceObjects(interfaceDevice->mtl);
+#       else
+            assert(false && "Unsupported Graphics API.");
+            return;
+#       endif
+            break;
+        }
         default:
             assert(false && "Unknown Graphics API.");
             return;
@@ -154,6 +170,14 @@ namespace RT64 {
         case UserConfiguration::GraphicsAPI::Vulkan: {
             ImGui_ImplVulkan_Shutdown();
             vulkanContext.reset(nullptr);
+            break;
+        }
+        case UserConfiguration::GraphicsAPI::Metal: {
+#       if defined(__APPLE__)
+            ImGui_ImplMetal_Shutdown();
+#       else
+            assert(false && "Unsupported Graphics API.");
+#       endif
             break;
         }
         default:
@@ -207,6 +231,9 @@ namespace RT64 {
             ImGui_ImplVulkan_NewFrame();
             break;
         }
+        case UserConfiguration::GraphicsAPI::Metal: {
+            break;
+        }
         default:
             assert(false && "Unknown Graphics API.");
             break;
@@ -240,6 +267,46 @@ namespace RT64 {
             case UserConfiguration::GraphicsAPI::Vulkan: {
                 VulkanCommandList *interfaceCommandList = static_cast<VulkanCommandList *>(commandList);
                 ImGui_ImplVulkan_RenderDrawData(drawData, interfaceCommandList->vk);
+                break;
+            }
+            case UserConfiguration::GraphicsAPI::Metal: {
+#       if defined(__APPLE__)
+                MetalCommandList *interfaceCommandList = static_cast<MetalCommandList *>(commandList);
+                interfaceCommandList->checkActiveRenderEncoder();
+                assert(interfaceCommandList->targetFramebuffer != nullptr);
+                assert(!interfaceCommandList->targetFramebuffer->colorAttachments.empty());
+
+                MTL::RenderPassDescriptor *renderDescriptor = MTL::RenderPassDescriptor::renderPassDescriptor();
+                for (uint32_t i = 0; i < interfaceCommandList->targetFramebuffer->colorAttachments.size(); i++) {
+                    MTL::RenderPassColorAttachmentDescriptor *colorAttachment = renderDescriptor->colorAttachments()->object(i);
+                    colorAttachment->setTexture(interfaceCommandList->targetFramebuffer->colorAttachments[i].getTexture());
+                    colorAttachment->setLoadAction(MTL::LoadActionLoad);
+                    colorAttachment->setStoreAction(MTL::StoreActionStore);
+                }
+
+                if (interfaceCommandList->targetFramebuffer->depthAttachment.format != RenderFormat::UNKNOWN) {
+                    MTL::RenderPassDepthAttachmentDescriptor *depthAttachment = renderDescriptor->depthAttachment();
+                    depthAttachment->setTexture(interfaceCommandList->targetFramebuffer->depthAttachment.getTexture());
+                    depthAttachment->setLoadAction(MTL::LoadActionLoad);
+                    depthAttachment->setStoreAction(MTL::StoreActionStore);
+
+                    if (RenderFormatIsStencil(interfaceCommandList->targetFramebuffer->depthAttachment.format)) {
+                        MTL::RenderPassStencilAttachmentDescriptor *stencilAttachment = renderDescriptor->stencilAttachment();
+                        stencilAttachment->setTexture(interfaceCommandList->targetFramebuffer->depthAttachment.getTexture());
+                        stencilAttachment->setLoadAction(MTL::LoadActionLoad);
+                        stencilAttachment->setStoreAction(MTL::StoreActionStore);
+                    }
+                }
+
+                if (interfaceCommandList->targetFramebuffer->samplePositionsEnabled) {
+                    renderDescriptor->setSamplePositions(interfaceCommandList->targetFramebuffer->samplePositions, interfaceCommandList->targetFramebuffer->sampleCount);
+                }
+
+                ImGui_ImplMetal_NewFrame(renderDescriptor);
+                ImGui_ImplMetal_RenderDrawData(drawData, interfaceCommandList->mtl, interfaceCommandList->activeRenderEncoder);
+#       else
+                assert(false && "Unsupported Graphics API.");
+#       endif
                 break;
             }
             default:
