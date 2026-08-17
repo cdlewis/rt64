@@ -1431,9 +1431,23 @@ namespace RT64 {
         targetDrawCall.fbStorage = p.fbStorage;
         targetDrawCall.sceneIndices.clear();
 
+        const auto projectionAdjustsAspect = [&](const Projection &projection) {
+            const uint32_t transformGroupIndex = drawData.viewProjTransformGroups[projection.transformsIndex];
+            return drawData.transformGroups[transformGroupIndex].aspectMode == G_EX_ASPECT_ADJUST;
+        };
+
         const float SimilarityPercentage = 0.1f; // TODO: Make more strict once VI ratios are in.
         const float scissorRatio = static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
-        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
+        bool adjustedProjectionPair = false;
+        for (uint32_t projectionIndex = 0; projectionIndex < fbPair.projectionCount; projectionIndex++) {
+            const Projection &pairProjection = fbPair.projections[projectionIndex];
+            adjustedProjectionPair = projectionAdjustsAspect(pairProjection);
+            if (adjustedProjectionPair) {
+                break;
+            }
+        }
+        const bool adjustRatio = !adjustedProjectionPair &&
+            (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
         const float aspectRatioScale = adjustRatio ? (p.aspectRatioTarget / p.aspectRatioSource) : 1.0f;
         InstanceDrawCall instanceDrawCall;
         interop::RenderIndices renderIndices;
@@ -1484,6 +1498,8 @@ namespace RT64 {
             float projInvRatioScale = 1.0f / aspectRatioScale;
             const int16_t *viewportClipRatios = &drawData.viewportClipRatios[proj.transformsIndex * 4];
             const uint16_t viewportOrigin = drawData.viewportOrigins[proj.transformsIndex];
+            const bool adjustProjectionAspect = projectionAdjustsAspect(proj);
+            const float projectionExtOriginPercentage = adjustProjectionAspect ? 1.0f : extOriginPercentage;
             if (proj.usesViewport()) {
                 // The call's scissor spans the whole width of the framebuffer pair scissor. Custom origin must not be in use to be able to use the stretched viewport.
                 const auto &viewport = drawData.rspViewports[proj.transformsIndex];
@@ -1498,12 +1514,12 @@ namespace RT64 {
                     triangles.screenScale.x = originalWidth / wideWidth;
 
                     if (viewportOrigin < G_EX_ORIGIN_NONE) {
-                        const float centerOffset = ((middleViewport * viewportOrigin) / G_EX_ORIGIN_CENTER) * extOriginPercentage + middleViewport * (1.0f - extOriginPercentage);
+                        const float centerOffset = ((middleViewport * viewportOrigin) / G_EX_ORIGIN_CENTER) * projectionExtOriginPercentage + middleViewport * (1.0f - projectionExtOriginPercentage);
                         triangles.screenOffset.x = halfPixelOffset.x + ((centerOffset - middleViewport) / halfViewportSize.x);
                     }
                 }
 
-                viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
+                viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, projectionExtOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
             }
 
             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
@@ -1535,7 +1551,13 @@ namespace RT64 {
                         }
                     }
 
-                    float invRatioScale = 1.0f / aspectRatioScale;
+                    const bool adjustRectAspect = (call.callDesc.rectAspect == G_EX_ASPECT_ADJUST);
+                    float invRatioScale = adjustRectAspect
+                        ? (p.aspectRatioSource / p.aspectRatioTarget)
+                        : (1.0f / aspectRatioScale);
+                    const float rectExtOriginPercentage = (adjustRectAspect || adjustProjectionAspect)
+                        ? 1.0f
+                        : extOriginPercentage;
                     int32_t horizontalMisalignment = 0;
 
                     // A rect that spans the whole width of the scissor.
@@ -1547,7 +1569,7 @@ namespace RT64 {
                         horizontalMisalignment = int32_t(p.horizontalMisalignment);
                     }
 
-                    clearRect.rect = convertFixedRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+                    clearRect.rect = convertFixedRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, rectExtOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
                 }
                 else if (call.callDesc.extendedType != DrawExtendedType::None) {
                     switch (call.callDesc.extendedType) {
@@ -1623,7 +1645,15 @@ namespace RT64 {
                         triangles.vertexTestZ = (vertexTestZCallIndex >= 0);
                         triangles.postBlendDitherNoise = false;
 
-                        float invRatioScale = 1.0f / aspectRatioScale;
+                        const bool adjustRectAspect = (call.callDesc.rectAspect == G_EX_ASPECT_ADJUST);
+                        float invRatioScale = adjustRectAspect
+                            ? (p.aspectRatioSource / p.aspectRatioTarget)
+                            : (1.0f / aspectRatioScale);
+                        // Explicit aspect adjustment targets the full output aspect, so its extended origins must
+                        // use that same target instead of the independently configured HUD aspect.
+                        const float rectExtOriginPercentage = (adjustRectAspect || adjustProjectionAspect)
+                            ? 1.0f
+                            : extOriginPercentage;
                         float horizontalMisalignment = 0.0f;
                         switch (proj.type) {
                         case Projection::Type::Perspective:
@@ -1652,7 +1682,7 @@ namespace RT64 {
                                 horizontalMisalignment = p.horizontalMisalignment;
                             }
 
-                            RenderViewport viewportRect = convertViewportRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+                            RenderViewport viewportRect = convertViewportRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, rectExtOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
                             triangles.screenScale = { viewportRect.width / framebuffer.viewport.width, viewportRect.height / framebuffer.viewport.height };
                             triangles.screenOffset.x = halfPixelOffset.x + ((viewportRect.x + viewportRect.width / 2.0f) - halfViewportSize.x) / halfViewportSize.x;
                             triangles.screenOffset.y = halfPixelOffset.y + (halfViewportSize.y - (viewportRect.y + viewportRect.height / 2.0f)) / halfViewportSize.y;
@@ -1676,7 +1706,7 @@ namespace RT64 {
                             break;
                         }
 
-                        triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
+                        triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, invRatioScale, rectExtOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
 
                         bool usesViewport = (proj.type == Projection::Type::Perspective) || (proj.type == Projection::Type::Orthographic);
                         if (usesViewport) {
